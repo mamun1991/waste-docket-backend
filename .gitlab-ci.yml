@@ -1,0 +1,222 @@
+variables:
+  PROJECT_NAME: "wastedocket-backend"
+  DOCKER_HOST: tcp://docker:2375
+
+stages:
+  - test
+  - build
+  - canary_deploy
+  - deploy
+
+test:
+  image: node:16.13.2-bullseye
+  script:
+    - echo "this job includes unit test, lints and other tests"
+    # ignore the npm audit error code by forcing to return 0 exit code
+    - npm audit || exit 0
+    - npm run lint || exit 0
+  stage: test
+  only:
+      - staging
+      - main
+  allow_failure: true
+
+push_prod_image:
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_BUILDKIT: 1
+    AWS_ACCESS_KEY_ID: $PROD_AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $PROD_AWS_SECRET_ACCESS_KEY
+  image:
+    name: stacksolve/ci-tools:1.2
+  services:
+    - docker:dind
+  stage: build
+  only:
+    - main
+  script:
+    - aws ecr get-login-password --region us-west-2 | docker login  --username AWS --password-stdin 277566174719.dkr.ecr.us-west-2.amazonaws.com
+    - docker build -t wastedocket-prod-backend .
+    - docker tag wastedocket-prod-backend:latest 277566174719.dkr.ecr.us-west-2.amazonaws.com/wastedocket-prod-backend:latest
+    - docker push 277566174719.dkr.ecr.us-west-2.amazonaws.com/wastedocket-prod-backend:latest
+
+deploy_canary_prod_image:
+  image: stacksolve/ci-tools:1.2
+  stage: canary_deploy
+  only:
+    - main
+  variables:
+      ENVIRONMENT_NAME: "wastedocket-prod"
+      COMPONENT: "BACKEND"
+      AWS_ACCESS_KEY_ID: $PROD_AWS_ACCESS_KEY_ID
+      AWS_SECRET_ACCESS_KEY: $PROD_AWS_SECRET_ACCESS_KEY
+  script:
+    - >
+      if [ $canary == true ]; then
+        ################## context set ###############
+        set -euo pipefail
+        apk add --no-cache jq
+        aws eks update-kubeconfig --name secomind-prod
+        kubectl config set-context --current --namespace wastedocket
+        ################## canary Deployment ###############
+        kubectl patch deployment canary-wastedocket-prod-backend -p "{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"date\":\"`date +'%s'`\"}}}}}"
+        sleep 10
+        while [ "$(kubectl get pods -l=app='canary-wastedocket-prod-backend' -o jsonpath='{.items[*].status.containerStatuses[0].ready}')" != "true" ]; do
+          sleep 1
+          echo "Waiting for pod to be ready."
+        done
+        echo "SUCCEEDED"
+        statuscode=`curl --head -X GET --retry $max_attempts --retry-connrefused --retry-delay $retry_delay --max-time $max_time $backend_wastedocket_production_url_canary | grep 'HTTP' | tail -n 1 | cut -d' ' -f2`
+        
+      else
+        echo "canary deployment not enabled"
+        echo -e "Hi $CI_COMMIT_AUTHOR, Your last deployment ($CI_JOB_URL) has been failed.\n\nCOMMIT TITLE = $CI_COMMIT_TITLE\nCOMMIT SHA = $CI_COMMIT_SHA\nCOMMIT TIMESTAMP=$CI_COMMIT_TIMESTAMP"
+        echo "FAILED"
+        exit 1
+      fi
+
+deploy_prod_image:
+  image: stacksolve/ci-tools:1.2
+  stage: deploy
+  only:
+    - main
+  before_script:
+    - apt-get update
+    - apt-get install curl -y
+  variables:
+    ENVIRONMENT_NAME: "wastedocket-prod"
+    COMPONENT: "BACKEND"
+  script:
+      - >
+        if [ $canary == true ]; then
+            ################## context set ###############
+            set -euo pipefail
+            apk add --no-cache jq
+            aws eks update-kubeconfig --name secomind-prod
+            kubectl config set-context --current --namespace wastedocket
+            ################## Backend Deployment ###############
+            kubectl patch deployment wastedocket-prod-backend -p "{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"date\":\"`date +'%s'`\"}}}}}"
+        else
+            echo "canary deployment not enabled"
+            echo -e "Hi $CI_COMMIT_AUTHOR, Your last deployment ($CI_JOB_URL) has been failed.\n\nCOMMIT TITLE = $CI_COMMIT_TITLE\nCOMMIT SHA = $CI_COMMIT_SHA\nCOMMIT TIMESTAMP=$CI_COMMIT_TIMESTAMP"
+            exit 1
+        fi
+
+push_stage_image:
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_BUILDKIT: 1
+    AWS_ACCESS_KEY_ID: $STAGE_AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $STAGE_AWS_SECRET_ACCESS_KEY
+  image:
+    name: amazon/aws-cli
+    entrypoint: [""]
+  services:
+    - docker:dind
+  before_script:
+    - amazon-linux-extras install docker
+    - aws --version
+    - docker --version
+  stage: build
+  only:
+    - staging
+  script:
+    - aws ecr get-login-password --region us-west-2 | docker login  --username AWS --password-stdin 517297055879.dkr.ecr.us-west-2.amazonaws.com
+    - docker build -t wastedocket-stage-backend .
+    - docker tag wastedocket-stage-backend:latest 517297055879.dkr.ecr.us-west-2.amazonaws.com/wastedocket-stage-backend:latest
+    - docker push 517297055879.dkr.ecr.us-west-2.amazonaws.com/wastedocket-stage-backend:latest
+    - docker rmi wastedocket-stage-backend:latest
+
+deploy_canary_stage_image:
+  image: stacksolve/ci-tools:1.2
+  stage: canary_deploy
+  only:
+    - staging
+  variables:
+      ENVIRONMENT_NAME: "wastedocket-stage"
+      COMPONENT: "BACKEND"
+      AWS_ACCESS_KEY_ID: $STAGE_AWS_ACCESS_KEY_ID
+      AWS_SECRET_ACCESS_KEY: $STAGE_AWS_SECRET_ACCESS_KEY
+
+
+  script:
+    - >
+      if [ $canary == true ]; then
+        ################## context set ###############
+        set -euo pipefail
+        apk add --no-cache jq
+
+        # kubectl config set-cluster brooklet-nonprod --server="$KUBE_URL_BROOKLETNONPROD" --insecure-skip-tls-verify=true
+        # kubectl config set-credentials brookletnonprod-gitlab --token=$KUBE_TOKEN_BROOKLETNONPROD
+        # kubectl config set-context brooklet-nonprod  --cluster=brooklet-nonprod --user=brookletnonprod-gitlab
+        # kubectl config use-context brooklet-nonprod
+        # apk add aws-cli
+        CREDENTIALS=$(aws sts assume-role --role-arn arn:aws:iam::517297055879:role/StudioX-gitlab-runner-RnrASG-1OLJZIA-ASGRebootRole-2HVNAXMZ319G --role-session-name codebuild-kubectl --duration-seconds 900)
+        export AWS_ACCESS_KEY_ID="$(echo ${CREDENTIALS} | jq -r '.Credentials.AccessKeyId')"
+        export AWS_SECRET_ACCESS_KEY="$(echo ${CREDENTIALS} | jq -r '.Credentials.SecretAccessKey')"
+        export AWS_SESSION_TOKEN="$(echo ${CREDENTIALS} | jq -r '.Credentials.SessionToken')"
+        export AWS_EXPIRATION=$(echo ${CREDENTIALS} | jq -r '.Credentials.Expiration')
+        aws eks update-kubeconfig --name secomind-staging
+        kubectl config set-context --current --namespace wastedocket
+        ################## canary Deployment ###############
+        kubectl patch deployment wastedocket-stage-canary-backend -p "{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"date\":\"`date +'%s'`\"}}}}}"
+        sleep 10
+        while [ "$(kubectl get pods -l=app='wastedocket-stage-canary' -o jsonpath='{.items[*].status.containerStatuses[0].ready}')" != "true" ]; do
+          sleep 1
+          echo "Waiting for pod to be ready."
+        done
+        echo "SUCCEEDED"
+        statuscode=`curl --head -X GET --retry $max_attempts --retry-connrefused --retry-delay $retry_delay --max-time $max_time $backend_wastedocket_stage_url_canary | grep 'HTTP' | tail -n 1 | cut -d' ' -f2`
+        if [ $statuscode -eq 404 ]; then
+          echo $statuscode
+          echo "Status code health check passed"
+          echo "SUCCEEDED"
+        else 
+          echo -e "Hi $CI_COMMIT_AUTHOR, Your last deployment ($CI_JOB_URL) has been failed.\n\nCOMMIT TITLE = $CI_COMMIT_TITLE\nCOMMIT SHA = $CI_COMMIT_SHA\nCOMMIT TIMESTAMP=$CI_COMMIT_TIMESTAMP"
+          echo "FAILED"
+          kubectl logs -l=app='wastedocket-stage-canary' --tail=100
+          exit 1
+        fi
+      else
+        echo "canary deployment not enabled"
+        echo -e "Hi $CI_COMMIT_AUTHOR, Your last deployment ($CI_JOB_URL) has been failed.\n\nCOMMIT TITLE = $CI_COMMIT_TITLE\nCOMMIT SHA = $CI_COMMIT_SHA\nCOMMIT TIMESTAMP=$CI_COMMIT_TIMESTAMP"
+        echo "FAILED"
+        exit 1
+      fi
+
+deploy_stage_image:
+  image: stacksolve/ci-tools:1.2
+  stage: deploy
+  only:
+    - staging
+  variables:
+    ENVIRONMENT_NAME: "wastedocket-stage"
+    COMPONENT: "BACKEND"
+    AWS_ACCESS_KEY_ID: $STAGE_AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $STAGE_AWS_SECRET_ACCESS_KEY
+  script:
+      - >
+        if [ $canary == true ]; then
+            ################## context set ###############
+            set -euo pipefail
+            apk add --no-cache jq
+            # kubectl config set-cluster brooklet-nonprod --server="$KUBE_URL_BROOKLETNONPROD" --insecure-skip-tls-verify=true
+            # kubectl config set-credentials brookletnonprod-gitlab --token=$KUBE_TOKEN_BROOKLETNONPROD
+            # kubectl config set-context brooklet-nonprod  --cluster=brooklet-nonprod --user=brookletnonprod-gitlab
+            # kubectl config use-context brooklet-nonprod
+            CREDENTIALS=$(aws sts assume-role --role-arn arn:aws:iam::517297055879:role/StudioX-gitlab-runner-RnrASG-1OLJZIA-ASGRebootRole-2HVNAXMZ319G --role-session-name codebuild-kubectl --duration-seconds 900)
+            export AWS_ACCESS_KEY_ID="$(echo ${CREDENTIALS} | jq -r '.Credentials.AccessKeyId')"
+            export AWS_SECRET_ACCESS_KEY="$(echo ${CREDENTIALS} | jq -r '.Credentials.SecretAccessKey')"
+            export AWS_SESSION_TOKEN="$(echo ${CREDENTIALS} | jq -r '.Credentials.SessionToken')"
+            export AWS_EXPIRATION=$(echo ${CREDENTIALS} | jq -r '.Credentials.Expiration')
+            aws eks update-kubeconfig --name secomind-staging
+            kubectl config set-context --current --namespace wastedocket
+            ################## Backend Deployment ###############
+            kubectl patch deployment wastedocket-stage-backend -p "{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"date\":\"`date +'%s'`\"}}}}}"
+        else
+            echo "canary deployment not enabled"
+            echo -e "Hi $CI_COMMIT_AUTHOR, Your last deployment ($CI_JOB_URL) has been failed.\n\nCOMMIT TITLE = $CI_COMMIT_TITLE\nCOMMIT SHA = $CI_COMMIT_SHA\nCOMMIT TIMESTAMP=$CI_COMMIT_TIMESTAMP"
+            exit 1
+        fi

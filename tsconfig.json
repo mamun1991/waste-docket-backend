@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "jsx": "react",
+    "allowSyntheticDefaultImports": true,
+    "allowUnreachableCode": true,
+    "allowUnusedLabels": true,
+    "diagnostics": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "listFiles": false,
+    "module": "ES2020",
+    "moduleResolution": "Node",
+    "noEmitHelpers": false,
+    "noEmitOnError": false,
+    "noFallthroughCasesInSwitch": false,
+    "noImplicitAny": false,
+    "noImplicitReturns": false,
+    "noImplicitUseStrict": false,
+    "noLib": false,
+    "outDir": "dist/",
+    "pretty": true,
+    "removeComments": false,
+    "sourceMap": true,
+    "suppressExcessPropertyErrors": true,
+    "suppressImplicitAnyIndexErrors": true,
+    "target": "ES2015",
+    "esModuleInterop": true
+  },
+  "exclude": ["node_modules", "dist"],
+  "include": ["src"]
+}
